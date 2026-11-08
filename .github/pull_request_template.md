@@ -1,4 +1,5 @@
 ## Description
+
 ## Related Issue(s)
 Resolves #
 
@@ -7,17 +8,16 @@ Resolves #
 - [ ] New feature (non-breaking change which adds functionality)
 - [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
 - [ ] Documentation update
-- [ ] Refactoring / Technical Debt
+- [ ] Refactoring / Technical debt
 
 ## Testing Performed
-- [ ] Local execution of `process_event.py`
-- [ ] Verified JSON output structure from Gemini API
-- [ ] Tested GitHub Action workflow trigger (dry-run)
-- [ ] Other: 
+- [ ] `npm run check` passes (static checks + unit tests)
+- [ ] Extension loaded unpacked in Chrome and popup/options flows smoke-tested
+- [ ] Demo Mode verified, and live provider path verified with a valid key
+- [ ] Other:
 
 ## Checklist
-- [ ] My code follows the code style of this project (PEP-8).
-- [ ] I have performed a self-review of my own code.
-- [ ] I have commented my code, particularly in hard-to-understand areas.
-- [ ] I have made corresponding changes to the documentation (README.md, etc.).
-- [ ] My changes generate no new warnings or errors in the CI pipeline.
+- [ ] My code is commented in hard-to-understand areas (comments in English)
+- [ ] I have performed a self-review of my own code
+- [ ] I have made corresponding changes to the documentation (README.md, etc.)
+- [ ] My changes generate no new warnings in CI

@@ -1,166 +1,171 @@
 """Create GitHub issues and PR comments from AI-generated change analysis.
-https://github.com/assembly-automation-hub/repo-governance
 
-This module runs inside GitHub Actions and inspects either push or pull request
-events. It gathers the relevant diff, sends the change summary to a hosted model,
-and uses the structured JSON response to open a GitHub issue and optionally post
-a pull request comment.
+This module runs inside GitHub Actions and inspects push or pull-request
+events. It gathers the relevant diff, sends it to a hosted model with a
+role-specific prompt (selected via event labels or diff auto-detection), and
+uses the structured JSON response to open a GitHub issue and, for pull
+requests, post a summary comment.
 
-The entry-point is the module itself — there are no classes. Execution proceeds
-top-to-bottom: environment variables are read, the diff is collected, a
-role-specific prompt is assembled based on the event's trigger labels, the
-hosted model is called, and finally a GitHub issue (and optional PR comment)
-is created.
+The workflow entry-point is ``python scripts/trigger_action.py``; all logic
+lives behind :func:`main` so the module is import-safe and unit-testable.
 
-Attributes:
-    gh_token (str | None): GitHub personal access token sourced from the
-        ``GITHUB_TOKEN`` environment variable. Used to authenticate all
-        PyGithub API calls.
-    model_token (str | None): Bearer token for the Azure-hosted model endpoint,
-        sourced from the ``GH_MODELS_TOKEN`` environment variable.
-    repo_name (str | None): The ``owner/repo`` identifier of the target
-        repository, sourced from the ``REPOSITORY`` environment variable.
-    event_name (str | None): The GitHub Actions event that triggered this
-        workflow run (``"push"`` or ``"pull_request"``), sourced from the
-        ``EVENT_NAME`` environment variable.
-    allowed_users (list[str]): Lowercase login names of GitHub users whose
-        events are eligible for analysis. Parsed from the comma-separated
-        ``ALLOWED_USER`` environment variable.
-    MODEL_NAME (str): The model identifier used in every inference request.
-    ENDPOINT (str): The Azure inference API URL for chat completions.
-    diff_text (str): Accumulated file-patch text collected from the triggering
-        commit or pull request. Capped at 10 000 characters for push events and
-        80 000 characters for pull-request events to stay within model limits.
-    event_context (str): A short human-readable description of the event (e.g.
-        commit message or PR title/body) prepended to every model prompt.
-    author_login (str): Lowercase GitHub login of the commit author or PR
-        author used for allow-list enforcement.
-    trigger_labels (list[str]): Lowercase label strings extracted from the
-        commit message brackets ``[label]`` or from the PR's applied labels.
-        Drive prompt-role selection later in the module.
-    dedup_key (str): A stable identifier (e.g. ``"PR #42"`` or
-        ``"commit:a1b2c3d"``) embedded in every generated issue body so that
-        duplicate issues can be detected on subsequent runs.
-    pr_ref (github.PullRequest.PullRequest | None): A live PyGithub pull
-        request object retained for posting the summary comment, or ``None``
-        when the triggering event is a push.
+Environment variables:
+    GITHUB_TOKEN (required): Token used for all PyGithub API calls.
+    GH_MODELS_TOKEN (required): Bearer token for the hosted inference endpoint.
+    REPOSITORY (required): ``owner/repo`` identifier to inspect.
+    EVENT_NAME (required): ``push`` or ``pull_request``.
+    COMMIT_SHA: Commit to inspect for push events (falls back to the PR head).
+    PR_NUMBER: Pull request number for pull_request events.
+    GITHUB_ACTOR: Actor login, used for the allow-list check on push events.
+    ALLOWED_USER: Comma-separated allow-list of GitHub logins. An empty list
+        fails closed — nobody is eligible.
 """
 
-import os
 import json
+import os
 import re
+import sys
 import time
-import requests
-from github import Github, Auth
+from itertools import islice
 
-# ---------------------------------------------------------------------------
-# Environment — read once at module level so all functions share the values.
-# ---------------------------------------------------------------------------
-gh_token = os.environ.get("GITHUB_TOKEN")
-model_token = os.environ.get("GH_MODELS_TOKEN")
-repo_name = os.environ.get("REPOSITORY")
-event_name = os.environ.get("EVENT_NAME")
-allowed_users = [u.strip().lower() for u in os.environ.get("ALLOWED_USER", "").split(",")]
+import requests
+from github import Auth, Github
 
 MODEL_NAME = "Llama-3.3-70B-Instruct"
 ENDPOINT = "https://models.inference.ai.azure.com/chat/completions"
 
-# Authenticate once; the ``repo`` object is reused throughout.
-auth = Auth.Token(gh_token)
-gh = Github(auth=auth)
-repo = gh.get_repo(repo_name)
+MAX_DIFF_PUSH = 10_000
+MAX_DIFF_PR = 80_000
+MIN_DIFF_LENGTH = 50
+# Bound the issue scan so a large tracker cannot exhaust the job timeout.
+ISSUE_SCAN_LIMIT = 200
+MODEL_RETRIES = 3
+MODEL_RETRY_DELAY_SECONDS = 5
+MODEL_TIMEOUT_SECONDS = 60
 
-# ---------------------------------------------------------------------------
-# Mutable state populated by the event-routing block below.
-# ---------------------------------------------------------------------------
-diff_text = ""
-event_context = ""
-author_login = ""
-trigger_labels = []
-dedup_key = ""
-pr_ref = None
-changed_files = []
 
-# ---------------------------------------------------------------------------
-# Event routing — collect the diff and metadata for push vs pull_request.
-# ---------------------------------------------------------------------------
-if event_name == "push":
+def parse_allowed_users(raw):
+    """Parse the comma-separated allow-list, dropping empty entries."""
+    return [name.strip().lower() for name in (raw or "").split(",") if name.strip()]
+
+
+def require_env(name):
+    value = os.environ.get(name)
+    if not value:
+        print(f"Missing required environment variable: {name}")
+        sys.exit(1)
+    return value
+
+
+def accumulate_diff(files, max_length):
+    """Build the diff payload, skipping binary files without patches."""
+    changed_files = []
+    diff_text = ""
+
+    for file in files:
+        changed_files.append(file.filename)
+        patch = getattr(file, "patch", None)
+        section = f"File: {file.filename}\nPatch:\n{patch if patch else '[no patch available]'}\n\n"
+        diff_text += section
+        if len(diff_text) > max_length:
+            diff_text += "\n[Diff truncated...]"
+            break
+
+    return changed_files, diff_text
+
+
+def collect_push_event(repo, allowed_users):
     commit_sha = os.environ.get("COMMIT_SHA")
-    commit = repo.get_commit(commit_sha)
+    if not commit_sha:
+        print("COMMIT_SHA is not set; skipping push analysis.")
+        return None
 
     actor_login = os.environ.get("GITHUB_ACTOR", "").strip().lower()
-    if actor_login not in allowed_users:
-        print(f"Action performed by {actor_login}, not in allowed list. Skipping.")
-        exit(0)
+    if not actor_login or actor_login not in allowed_users:
+        print(f"Action performed by {actor_login or '<unknown>'}, not in allowed list. Skipping.")
+        return None
 
-    pr_match = re.search(r'\(#(\d+)\)', commit.commit.message)
-    if pr_match:
-        dedup_key = f"PR #{pr_match.group(1)}"
-    else:
-        dedup_key = f"commit:{commit_sha[:7]}"
+    commit = repo.get_commit(commit_sha)
+    pr_match = re.search(r"\(#(\d+)\)", commit.commit.message)
+    dedup_key = f"PR #{pr_match.group(1)}" if pr_match else f"commit:{commit_sha[:7]}"
 
-    event_context = f"Commit Message: {commit.commit.message}"
-    trigger_labels = [m.lower() for m in re.findall(r'\[(.*?)\]', commit.commit.message)]
+    changed_files, diff_text = accumulate_diff(commit.files, MAX_DIFF_PUSH)
 
-    for file in commit.files:
-        changed_files.append(file.filename)
-        diff_text += f"File: {file.filename}\nPatch:\n{file.patch}\n\n"
-        if len(diff_text) > 10000:
-            diff_text += "\n[Diff truncated...]"
-            break
-
-elif event_name == "pull_request":
-    pr_number = int(os.environ.get("PR_NUMBER"))
-    pr = repo.get_pull(pr_number)
-    author_login = pr.user.login.strip().lower()
-    if author_login not in allowed_users:
-        exit(0)
-
-    pr_ref = pr
-    dedup_key = f"PR #{pr_number}"
-    event_context = f"PR Title: {pr.title}\nPR Body: {pr.body}"
-    trigger_labels = [label.name.lower() for label in pr.labels]
-
-    for file in pr.get_files():
-        changed_files.append(file.filename)
-        diff_text += f"File: {file.filename}\nPatch:\n{file.patch}\n\n"
-        if len(diff_text) > 80000:
-            diff_text += "\n[Diff truncated...]"
-            break
-else:
-    exit(0)
-
-if len(diff_text.strip()) < 50:
-    print("Diff too small to analyze. Skipping.")
-    exit(0)
-
-for issue in repo.get_issues(state="all"):
-    if dedup_key in (issue.body or ""):
-        print(f"Issue for {dedup_key} already exists (#{issue.number}), skipping.")
-        exit(0)
+    return {
+        "dedup_key": dedup_key,
+        "event_context": f"Commit Message: {commit.commit.message}",
+        "trigger_labels": [m.lower() for m in re.findall(r"\[(.*?)\]", commit.commit.message)],
+        "changed_files": changed_files,
+        "diff_text": diff_text,
+        "pr_ref": None,
+        "commit_sha": commit_sha,
+    }
 
 
-def was_already_closed(title_keyword: str) -> bool:
+def collect_pull_request_event(repo, allowed_users):
+    pr_number = os.environ.get("PR_NUMBER")
+    if not pr_number:
+        print("PR_NUMBER is not set; skipping pull request analysis.")
+        return None
+
+    try:
+        pr = repo.get_pull(int(pr_number))
+    except ValueError:
+        print(f"PR_NUMBER {pr_number!r} is not an integer; skipping.")
+        return None
+
+    author_login = (pr.user.login or "").strip().lower()
+    if not author_login or author_login not in allowed_users:
+        print(f"Pull request opened by {author_login or '<unknown>'}, not in allowed list. Skipping.")
+        return None
+
+    changed_files, diff_text = accumulate_diff(pr.get_files(), MAX_DIFF_PR)
+
+    return {
+        "dedup_key": f"PR #{pr_number}",
+        "event_context": f"PR Title: {pr.title}\nPR Body: {pr.body}",
+        "trigger_labels": [label.name.lower() for label in pr.labels],
+        "changed_files": changed_files,
+        "diff_text": diff_text,
+        "pr_ref": pr,
+        "commit_sha": pr.head.sha,
+    }
+
+
+def iter_reviewable_issues(repo, state):
+    """Yield issues only, skipping the pull requests the API also returns."""
+    for issue in islice(repo.get_issues(state=state), ISSUE_SCAN_LIMIT):
+        if getattr(issue, "pull_request", None) is not None:
+            continue
+        yield issue
+
+
+def find_duplicate_issue(repo, dedup_key):
+    for issue in iter_reviewable_issues(repo, "all"):
+        if dedup_key in (issue.body or ""):
+            print(f"Issue for {dedup_key} already exists (#{issue.number}), skipping.")
+            return issue
+    return None
+
+
+def was_already_closed(repo, title_keyword):
     """Return whether a similar issue title already exists in closed issues."""
-    for issue in repo.get_issues(state="closed"):
-        if title_keyword.lower() in (issue.title or "").lower():
+    keyword = (title_keyword or "").lower()
+    if not keyword:
+        return False
+    for issue in iter_reviewable_issues(repo, "closed"):
+        if keyword in (issue.title or "").lower():
             print(f"Similar closed issue found: #{issue.number} — skipping.")
             return True
     return False
 
 
-def build_permalink(filename: str, line: int = 1) -> str:
-    """Build a GitHub blob permalink for a file and line number."""
-    sha = os.environ.get("COMMIT_SHA") or ""
-    if not sha and pr_ref:
-        sha = pr_ref.head.sha
-    return f"https://github.com/{repo_name}/blob/{sha}/{filename}#L{line}"
+def build_permalink(repo_name, commit_sha, filename, line=1):
+    return f"https://github.com/{repo_name}/blob/{commit_sha}/{filename}#L{line}"
 
 
-# ---------------------------------------------------------------------------
 # Auto-detection of change type from file paths and diff content.
 # Used when no explicit labels are provided in commit message or PR.
-# ---------------------------------------------------------------------------
 def detect_change_type(files: list, diff: str, context: str) -> str:
     """Determine the analysis role based on changed file paths and diff content.
 
@@ -244,10 +249,6 @@ def detect_change_type(files: list, diff: str, context: str) -> str:
 
     return "general"
 
-
-# ---------------------------------------------------------------------------
-# Severity guidance shared across all prompt roles.
-# ---------------------------------------------------------------------------
 severity_guide = """
 Use the following severity scale. You have 7 levels — pick the one that best matches the ACTUAL impact:
 
@@ -395,108 +396,156 @@ LABEL_TO_ROLE = {
     "config": "config", "infra": "config", "infrastructure": "config",
 }
 
-# ---------------------------------------------------------------------------
-# Prompt routing — label match first, then auto-detect from diff content.
-# ---------------------------------------------------------------------------
-role_key = None
-for label in trigger_labels:
-    if label in LABEL_TO_ROLE:
-        role_key = LABEL_TO_ROLE[label]
-        break
 
-if not role_key:
-    role_key = detect_change_type(changed_files, diff_text, event_context)
-    print(f"Auto-detected change type: {role_key}")
+# Prompt routing — label match first, then auto-detection from diff content.
+def select_role_key(trigger_labels, changed_files, diff_text, event_context):
+    for label in trigger_labels:
+        if label in LABEL_TO_ROLE:
+            return LABEL_TO_ROLE[label]
+    role = detect_change_type(changed_files, diff_text, event_context)
+    print(f"Auto-detected change type: {role}")
+    return role
 
-role_instruction = PROMPT_ROLES.get(role_key, PROMPT_ROLES["general"])
 
-prompt = f"""{role_instruction}
+def build_prompt(role_key, event_context, changed_files, diff_text):
+    role_instruction = PROMPT_ROLES.get(role_key, PROMPT_ROLES["general"])
+    return f"""{role_instruction}
 
 Do NOT invent problems that do not exist in the diff. Base your analysis strictly on what you see.
 {severity_guide}
 Context: {event_context}
-Changed files: {', '.join(changed_files)}
+Changed files: {", ".join(changed_files)}
 Changes: {diff_text}
 {base_instructions}"""
 
 
-def call_model(prompt: str, retries: int = 3, delay: int = 5) -> dict:
+def call_model(model_token, prompt):
     """Send a review prompt to the hosted model and parse the JSON reply."""
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {model_token}"
+        "Authorization": f"Bearer {model_token}",
     }
     payload = {
         "messages": [
             {"role": "system", "content": "You are a professional software auditor. Always return valid JSON only. No markdown, no explanation, just the JSON object."},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt},
         ],
         "model": MODEL_NAME,
-        "temperature": 0.1
+        "temperature": 0.1,
     }
 
-    for attempt in range(retries):
+    for attempt in range(1, MODEL_RETRIES + 1):
         try:
-            resp = requests.post(ENDPOINT, headers=headers, json=payload, timeout=60)
+            resp = requests.post(ENDPOINT, headers=headers, json=payload, timeout=MODEL_TIMEOUT_SECONDS)
             resp.raise_for_status()
-            data = resp.json()
-            raw = data['choices'][0]['message']['content'].strip()
-            raw = re.sub(r'^```json\s*|```$', '', raw, flags=re.MULTILINE).strip()
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
             return json.loads(raw)
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
+        except Exception as error:
+            print(f"Attempt {attempt} failed: {error}")
+            if attempt < MODEL_RETRIES:
+                time.sleep(MODEL_RETRY_DELAY_SECONDS)
 
     print("All attempts failed. Exiting gracefully.")
-    exit(0)
+    sys.exit(0)
 
 
-# ---------------------------------------------------------------------------
-# Main execution — call the model and post the results to GitHub.
-# ---------------------------------------------------------------------------
-
-result = call_model(prompt)
-
-title_keyword = result.get("issue_title", "")[:40]
-if was_already_closed(title_keyword):
-    exit(0)
-
-affected_file = result.get("affected_file", "")
-affected_line = result.get("affected_line", 1)
-
-if affected_file:
-    permalink = build_permalink(affected_file, affected_line)
-    issue_body = result["issue_body"].replace("PUT_PERMALINK_HERE", permalink)
-else:
-    issue_body = result["issue_body"].replace("PUT_PERMALINK_HERE", "_No specific file identified_")
-
-actor_name = os.environ.get("GITHUB_ACTOR", "unknown")
-footer = f"\n\n---\n*Generated from {dedup_key} | Auto-detected role: `{role_key}` | Processed by actor: {actor_name}*"
-
-severity = result.get("severity", "medium").lower()
-severity_label_map = {
-    "critical":      "severity: critical",
-    "high":          "severity: high",
-    "elevated":      "severity: elevated",
-    "medium":        "severity: medium",
-    "moderate":      "severity: moderate",
-    "low":           "severity: low",
+SEVERITY_LABELS = {
+    "critical": "severity: critical",
+    "high": "severity: high",
+    "elevated": "severity: elevated",
+    "medium": "severity: medium",
+    "moderate": "severity: moderate",
+    "low": "severity: low",
     "informational": "severity: informational",
 }
-extra_labels = [severity_label_map.get(severity, "severity: medium")]
-all_labels = list(set(result.get("labels", []) + extra_labels))
 
-issue = repo.create_issue(
-    title=result["issue_title"],
-    body=issue_body + footer,
-    labels=all_labels
-)
-print(f"Created issue #{issue.number}: {issue.title}")
 
-if pr_ref:
-    summary = result.get("summary", "")
-    if summary:
+def main():
+    gh_token = require_env("GITHUB_TOKEN")
+    model_token = require_env("GH_MODELS_TOKEN")
+    repo_name = require_env("REPOSITORY")
+    event_name = os.environ.get("EVENT_NAME", "").strip().lower()
+
+    allowed_users = parse_allowed_users(os.environ.get("ALLOWED_USER"))
+    if not allowed_users:
+        # Fail closed: without an explicit allow-list, nobody is eligible.
+        print("ALLOWED_USER is empty; nobody is eligible for analysis. Skipping.")
+        return 0
+
+    gh = Github(auth=Auth.Token(gh_token))
+    repo = gh.get_repo(repo_name)
+
+    if event_name == "push":
+        context = collect_push_event(repo, allowed_users)
+    elif event_name == "pull_request":
+        context = collect_pull_request_event(repo, allowed_users)
+    else:
+        print(f"Unsupported event: {event_name or '<unset>'}. Skipping.")
+        return 0
+
+    if context is None:
+        return 0
+
+    if len(context["diff_text"].strip()) < MIN_DIFF_LENGTH:
+        print("Diff too small to analyze. Skipping.")
+        return 0
+
+    if find_duplicate_issue(repo, context["dedup_key"]) is not None:
+        return 0
+
+    role_key = select_role_key(
+        context["trigger_labels"],
+        context["changed_files"],
+        context["diff_text"],
+        context["event_context"],
+    )
+    prompt = build_prompt(role_key, context["event_context"], context["changed_files"], context["diff_text"])
+
+    result = call_model(model_token, prompt)
+    if not isinstance(result, dict):
+        print("Model returned a non-object JSON payload. Exiting gracefully.")
+        return 0
+
+    issue_title = str(result.get("issue_title") or "").strip()
+    issue_body = str(result.get("issue_body") or "").strip()
+    if not issue_title or not issue_body:
+        print("Model response is missing issue_title or issue_body. Exiting gracefully.")
+        return 0
+
+    title_keyword = issue_title[:40]
+    if was_already_closed(repo, title_keyword):
+        return 0
+
+    affected_file = str(result.get("affected_file") or "")
+    try:
+        affected_line = int(result.get("affected_line") or 1)
+    except (TypeError, ValueError):
+        affected_line = 1
+
+    if affected_file:
+        permalink = build_permalink(repo_name, context["commit_sha"], affected_file, affected_line)
+        issue_body = issue_body.replace("PUT_PERMALINK_HERE", permalink)
+    else:
+        issue_body = issue_body.replace("PUT_PERMALINK_HERE", "_No specific file identified_")
+
+    actor_name = os.environ.get("GITHUB_ACTOR", "unknown")
+    footer = (
+        f"\n\n---\n*Generated from {context['dedup_key']} | "
+        f"Auto-detected role: `{role_key}` | Processed by actor: {actor_name}*"
+    )
+
+    severity = str(result.get("severity", "medium")).lower()
+    severity_label = SEVERITY_LABELS.get(severity, "severity: medium")
+    model_labels = result.get("labels") if isinstance(result.get("labels"), list) else []
+    all_labels = sorted({str(label) for label in model_labels} | {severity_label})
+
+    issue = repo.create_issue(title=issue_title, body=issue_body + footer, labels=all_labels)
+    print(f"Created issue #{issue.number}: {issue.title}")
+
+    pr_ref = context["pr_ref"]
+    summary = str(result.get("summary") or "")
+    if pr_ref is not None and summary:
         pr_comment = (
             f"### AI Analysis Summary\n\n"
             f"{summary}\n\n"
@@ -505,3 +554,9 @@ if pr_ref:
         )
         pr_ref.create_issue_comment(pr_comment)
         print(f"Posted summary comment to PR #{pr_ref.number}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

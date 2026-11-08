@@ -15,6 +15,8 @@ The default provider configuration uses the following RapidAPI base URL:
 
 All requests are authenticated using RapidAPI headers. The extension injects these headers per request and replaces a placeholder key with the user-provided API key.
 
+The API key is stored in `chrome.storage.local` under the `apiKey` key. It is never written to `chrome.storage.sync` and never appears in provider definitions persisted in synced storage. Keys saved by versions ≤ 2.x inside the synced provider object are migrated automatically on first load.
+
 Required headers:
 
 - `X-RapidAPI-Key`: Your RapidAPI subscription key.
@@ -24,6 +26,8 @@ Required headers:
 X-RapidAPI-Key: <YOUR_RAPIDAPI_KEY>
 X-RapidAPI-Host: similarweb12.p.rapidapi.com
 ```
+
+Custom provider origins are only reachable after an optional host-permission grant, requested from the options page when saving a non-default Base URL. Requests to non-granted origins short-circuit with a descriptive error instead of hanging.
 
 ## 3. Endpoints
 
@@ -46,7 +50,7 @@ Returns visit metrics for the requested domain. In the extension rendering logic
 ```json
 {
   "domain": "example.com",
-  "month": "2025-07",
+  "month": "2026-10",
   "visits": 1234567
 }
 ```
@@ -110,3 +114,49 @@ During successful API execution, the call envelope is:
   "source": "api"
 }
 ```
+
+## 5. Messaging Protocol
+
+The popup and options pages never touch the network directly. They communicate with the service worker through `chrome.runtime.sendMessage`.
+
+### `ANALYZE_DOMAIN` request
+
+```json
+{
+  "type": "ANALYZE_DOMAIN",
+  "domain": "example.com",
+  "bypassCache": false
+}
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `type` | `string` | Yes | Must be `ANALYZE_DOMAIN`. |
+| `domain` | `string` | Yes | Raw input. Entries that cannot be normalized to a valid public domain yield an error envelope without network access. |
+| `bypassCache` | `boolean` | No | When `true`, skips the six-hour analysis cache (Refresh button). |
+
+### Response envelope
+
+```json
+{
+  "domain": "example.com",
+  "visits": { "ok": true, "data": {}, "source": "api" },
+  "geography": { "ok": true, "data": {}, "source": "api" },
+  "cached": false,
+  "tookMs": 842
+}
+```
+
+- `cached` is `true` when the payload was served from the local six-hour cache (`analysisCache:<domain>` in `chrome.storage.local`) without contacting the provider. Cached entries additionally carry `cachedAt` (Unix epoch milliseconds).
+- Error envelopes (HTTP failures, timeouts, unreachable hosts) always resolve — never throw — and carry `source: "fallback-mock"` plus an `error` string. Fallback envelopes are never cached.
+- `ok` reports whether the payload came from a successful response or from the bundled demo fixtures.
+
+## 6. Local Storage Schema
+
+| Key | Area | Description |
+| --- | --- | --- |
+| `provider` | sync | Endpoint/host definition (no secret material). |
+| `useMock` | sync | Force Demo Mode. |
+| `apiKey` | local | RapidAPI credential. Never synced. |
+| `recentDomains` | local | MRU list of up to 8 analyzed domains. |
+| `analysisCache:<domain>` | local | Cached analysis envelope with 6-hour TTL. |

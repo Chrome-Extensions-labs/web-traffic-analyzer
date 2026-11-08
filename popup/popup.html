@@ -1,8 +1,9 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>Traffic-Stats</title>
     <link rel="stylesheet" href="../styles/base.css" />
     <link rel="stylesheet" href="./popup.css" />
@@ -11,62 +12,81 @@
     <div class="container">
       <header>
         <div class="header-main">
-          <img src="../icons/icon128.png" alt="" class="logo" />
+          <img src="../icons/icon48.png" alt="" class="logo" width="28" height="28" />
           <h1>Traffic-Stats</h1>
         </div>
-        <button id="optionsBtn" class="opts-btn">⚙ Options</button>
+        <button id="optionsBtn" class="opts-btn" type="button" title="Open provider settings">
+          <span class="opts-btn__glyph" aria-hidden="true">⚙</span>
+          Options
+        </button>
       </header>
       <hr class="header-divider" />
 
-      <section id="optionsPanel" class="options-panel hidden">
-        <div class="options-grid">
-          <div>
-            <label for="baseUrl">Base URL</label>
-            <input id="baseUrl" type="text" placeholder="https://similarweb12.p.rapidapi.com" />
-          </div>
-          <div>
-            <label for="hostHeader">RapidAPI Host</label>
-            <input id="hostHeader" type="text" placeholder="similarweb12.p.rapidapi.com" />
-          </div>
-          <div>
-            <label for="epVisits">Visits endpoint</label>
-            <input id="epVisits" type="text" placeholder="/v1/website/visits?domain=" />
-          </div>
-          <div>
-            <label for="epGeo">Top Countries endpoint</label>
-            <input id="epGeo" type="text" placeholder="/v1/website/top-countries?domain=" />
-          </div>
-          <div>
-            <label for="apiKey">RapidAPI Key</label>
-            <input id="apiKey" type="text" placeholder="Your X-RapidAPI-Key" />
-          </div>
-        </div>
-        <label class="switch" for="useMock">
-          <input id="useMock" type="checkbox" />
-          <span>Switch Demo Mode</span>
-        </label>
-        <div class="options-actions">
-          <span id="saveStatus" class="save-status" aria-live="polite"></span>
-          <button class="save-btn" id="saveBtn">Save</button>
-        </div>
-      </section>
+      <form id="analyzeForm" class="input-row" autocomplete="off">
+        <input
+          id="domainInput"
+          type="text"
+          inputmode="url"
+          spellcheck="false"
+          autocapitalize="none"
+          placeholder="example.com or https://example.com/…"
+          aria-label="Domain to analyze"
+          required
+        />
+        <button id="analyzeBtn" type="submit">
+          <span class="btn-label">Analyze</span>
+        </button>
+      </form>
 
-      <div class="input-row">
-        <input id="domainInput" type="text" placeholder="Enter domain e.g. example.com or URL" />
-        <button id="analyzeBtn">Analyze</button>
+      <div id="historyRow" class="history hidden" aria-label="Recent lookups">
+        <span class="history__label">Recent</span>
+        <div id="historyChips" class="history__chips"></div>
+        <button id="clearHistoryBtn" class="history__clear" type="button" title="Clear recent lookups">Clear</button>
       </div>
 
-      <section id="results" class="card hidden">
-        <div id="status"></div>
+      <p id="formError" class="form-error hidden" role="alert"></p>
+
+      <section id="results" class="card hidden" aria-live="polite">
+        <div class="result-header">
+          <div class="result-status">
+            <span id="statusDomain" class="result-status__domain"></span>
+            <span id="statusMeta" class="result-status__meta"></span>
+          </div>
+          <span id="sourceBadge" class="badge"></span>
+        </div>
+
         <div class="grid">
-          <div class="panel">
+          <div class="panel panel--visits">
             <h2>Estimated Visits</h2>
-            <div id="visits"></div>
+            <div class="visits-value">
+              <div id="visits" class="big">—</div>
+              <div id="visitMonth" class="visits-month"></div>
+            </div>
+            <div id="visitDelta" class="delta hidden"></div>
+            <svg id="sparkline" class="sparkline hidden" role="img" aria-label="Monthly visits trend" preserveAspectRatio="none" viewBox="0 0 120 36"></svg>
+            <button id="similarwebLink" class="link-btn" type="button">View full report on Similarweb ↗</button>
           </div>
           <div class="panel">
             <h2>Top Countries</h2>
             <ul id="countries"></ul>
           </div>
+        </div>
+
+        <div id="errorBox" class="error-box hidden">
+          <button id="errorToggle" class="error-box__toggle" type="button" aria-expanded="false" aria-controls="errorDetails">
+            Provider reported an issue — show details
+          </button>
+          <pre id="errorDetails" class="error-box__details hidden"></pre>
+        </div>
+
+        <div class="result-actions">
+          <button id="refreshBtn" class="ghost-btn" type="button" title="Bypass cache and re-query the provider">
+            <span aria-hidden="true">↻</span>
+            Refresh
+          </button>
+          <span class="result-actions__spacer"></span>
+          <button id="copyBtn" class="ghost-btn" type="button">Copy summary</button>
+          <button id="exportBtn" class="ghost-btn" type="button">Export JSON</button>
         </div>
       </section>
     </div>
