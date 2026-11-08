@@ -1,9 +1,10 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Traffic-Stats Options</title>
+    <meta name="color-scheme" content="dark" />
+    <title>Traffic-Stats Settings</title>
     <link rel="stylesheet" href="../styles/base.css" />
     <link rel="stylesheet" href="./options.css" />
   </head>
@@ -12,50 +13,79 @@
       <div class="settings">
         <h1>Traffic-Stats Settings</h1>
         <p class="note">
-          Provide your <b>RapidAPI</b> key for a Similarweb-compatible API. If left empty,
-          Traffic-Stats runs in <b>Demo Mode</b> with mock data.
+          Provide your <b>RapidAPI</b> key for a Similarweb-compatible API. Leave it empty to run in
+          <b>Demo Mode</b> with bundled sample data.
         </p>
 
-        <div class="row">
-          <div>
-            <label for="baseUrl">Base URL</label>
-            <input id="baseUrl" type="text" placeholder="https://similarweb12.p.rapidapi.com" />
+        <form id="settingsForm" autocomplete="off" novalidate>
+          <div class="row">
+            <div>
+              <label for="baseUrl">Base URL</label>
+              <input id="baseUrl" type="text" inputmode="url" spellcheck="false" placeholder="https://similarweb12.p.rapidapi.com" required />
+            </div>
+            <div>
+              <label for="hostHeader">RapidAPI Host Header</label>
+              <input id="hostHeader" type="text" spellcheck="false" autocapitalize="none" placeholder="similarweb12.p.rapidapi.com" required />
+            </div>
           </div>
-          <div>
-            <label for="hostHeader">RapidAPI Host Header</label>
-            <input id="hostHeader" type="text" placeholder="similarweb12.p.rapidapi.com" />
+
+          <div class="row">
+            <div>
+              <label for="epVisits">Visits Endpoint</label>
+              <input id="epVisits" type="text" spellcheck="false" placeholder="/v1/website/visits?domain=" required />
+            </div>
+            <div>
+              <label for="epGeo">Top Countries Endpoint</label>
+              <input id="epGeo" type="text" spellcheck="false" placeholder="/v1/website/top-countries?domain=" required />
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="apiKey">RapidAPI Key</label>
+              <div class="key-field">
+                <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="X-RapidAPI-Key" aria-describedby="apiKeyHelp" />
+                <button id="toggleKeyVisibility" type="button" class="key-toggle" aria-pressed="false" aria-controls="apiKey">Show</button>
+              </div>
+              <p id="apiKeyHelp" class="field-help">Stored locally on this device only — never synced or transmitted anywhere except the provider.</p>
+            </div>
+          </div>
+
+          <div class="switch">
+            <input id="useMock" type="checkbox" />
+            <label for="useMock">Force Demo Mode (ignore the API key and always use sample data)</label>
+          </div>
+
+          <ul id="validationErrors" class="validation-errors hidden" role="alert"></ul>
+
+          <div class="actions">
+            <span id="saveStatus" class="save-status" role="status" aria-live="polite"></span>
+            <button class="ghost" id="testBtn" type="button">Test connection</button>
+            <button class="save" id="saveBtn" type="submit">Save Settings</button>
+          </div>
+        </form>
+
+        <hr class="section-divider" />
+
+        <div class="maintenance">
+          <h2 class="maintenance__title">Maintenance</h2>
+          <div class="maintenance__row">
+            <div class="maintenance__copy">
+              <span class="maintenance__label">Default configuration</span>
+              <span class="maintenance__hint">Restore the bundled provider and clear the stored API key.</span>
+            </div>
+            <button class="ghost" id="resetBtn" type="button">Reset</button>
+          </div>
+          <div class="maintenance__row">
+            <div class="maintenance__copy">
+              <span class="maintenance__label">Analysis cache</span>
+              <span class="maintenance__hint">Cached results are kept for 6 hours to conserve API quota.</span>
+            </div>
+            <button class="ghost" id="clearCacheBtn" type="button">Clear cache</button>
           </div>
         </div>
 
-        <div class="row">
-          <div>
-            <label for="epVisits">Visits Endpoint (suffix)</label>
-            <input id="epVisits" type="text" placeholder="/v1/website/visits?domain=" />
-          </div>
-          <div>
-            <label for="epGeo">Top Countries Endpoint (suffix)</label>
-            <input id="epGeo" type="text" placeholder="/v1/website/top-countries?domain=" />
-          </div>
-        </div>
-
-        <div class="row">
-          <div>
-            <label for="apiKey">RapidAPI Key</label>
-            <input id="apiKey" type="text" placeholder="Your X-RapidAPI-Key" />
-          </div>
-        </div>
-
-        <div class="switch">
-          <input id="useMock" type="checkbox" />
-          <label for="useMock">Force Demo Mode (use mock data)</label>
-        </div>
-
-        <div class="actions">
-          <span id="saveStatus" class="save-status" aria-live="polite"></span>
-          <button class="save" id="saveBtn">Save Settings</button>
-        </div>
-
-        <p class="muted">Note: Endpoints differ by provider. Use the placeholders above as a starting point.</p>
+        <p class="muted">Endpoints differ by provider — use the placeholders as a starting point. Results are cached for 6 hours per domain.</p>
       </div>
     </div>
 

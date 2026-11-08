@@ -8,7 +8,7 @@ A provider-agnostic JavaScript logging and traffic-observability library for Chr
 [![Chrome Portfolio](https://img.shields.io/badge/Chrome_Web_Store-Portfolio-34A853?style=for-the-badge&logo=google-chrome&logoColor=white)](https://devs-in-exile.pages.dev/extensions)
 
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge)](#6-testing)
-[![Version](https://img.shields.io/badge/version-2.1.0-blue?style=for-the-badge)](manifest.json)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue?style=for-the-badge)](manifest.json)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue?style=for-the-badge)](LICENSE)
 [![Coverage](https://img.shields.io/badge/Coverage-Manual%20Validation-yellow?style=for-the-badge)](#6-testing)
 
@@ -30,17 +30,21 @@ A provider-agnostic JavaScript logging and traffic-observability library for Chr
 
 ## Features
 
-- Structured, provider-driven logging pipeline with configurable `baseUrl`, endpoints, and auth headers.
-- Domain canonicalization primitives (`normalizeDomain`, `getHostFromUrl`) to prevent malformed telemetry dimensions.
-- Asynchronous dual-stream retrieval model for visits and geography channels.
+- Structured, provider-driven analysis pipeline with configurable `baseUrl`, endpoints, and auth headers.
+- Hardened domain canonicalization (`normalizeDomain`, `getHostFromUrl`): scheme/credential/port stripping, punycode IDN support, and strict public-domain validation.
+- Asynchronous dual-stream retrieval model for the visits and geography channels with a bounded 12s timeout.
+- Six-hour result cache (`chrome.storage.local`) with manual bypass — protects provider quota without hiding provider outages.
 - Resilient failover semantics:
   - explicit mock mode (`useMock`)
-  - automatic mock failover when API key is absent
-  - automatic fallback envelope on transport and API errors
-- Runtime response harmonization for multi-provider schemas (`visits | totalVisits | value`, `topCountries | countries`).
+  - automatic mock mode when no API key is configured
+  - typed fallback envelopes with actionable error messages on transport and API errors
+- Runtime response harmonization for multi-provider schemas (`visits | totalVisits | value | visitsCount`, `topCountries | countries`).
+- Recent-domain lookup history with one-click re-analysis (locally stored, user-clearable).
+- Copy-to-clipboard summary, JSON export, and a direct Similarweb report link.
+- Options page with input validation, a live connection test, factory reset, and cache management.
 - Message-based worker orchestration (`ANALYZE_DOMAIN`) that decouples UI rendering from network execution.
-- Persistent configuration surface backed by `chrome.storage.sync`.
-- Extension-native UX integration through popup and options interfaces.
+- Credentials stored only in `chrome.storage.local` — never synced through the browser vendor's infrastructure.
+- Extension-native UX integration through popup and options interfaces built without `innerHTML` sinks.
 - Deterministic demo capability for onboarding, QA smoke tests, and API quota outage scenarios.
 
 > [!IMPORTANT]
@@ -68,21 +72,30 @@ A provider-agnostic JavaScript logging and traffic-observability library for Chr
 ```text
 Traffic-Stats-Analyzer/
 ├─ background/
-│  └─ service-worker.js
-├─ popup/
+│  └─ service-worker.js        # provider transport, cache orchestration, message router
+├─ popup/                      # quick-analysis UI (history chips, badges, export)
 │  ├─ popup.html
 │  ├─ popup.css
 │  └─ popup.js
-├─ options/
+├─ options/                    # provider settings, connection test, maintenance tools
 │  ├─ options.html
 │  ├─ options.css
 │  └─ options.js
-├─ shared/
-│  ├─ constants.js
-│  ├─ domain.js
-│  └─ mock-data.js
+├─ shared/                     # isomorphic modules (also imported by tests)
+│  ├─ constants.js             # storage keys, defaults, protocol names, limits
+│  ├─ domain.js                # normalization + validation
+│  ├─ format.js                # numbers, percents, flags, relative time
+│  ├─ provider-config.js       # config access layer + legacy key migration
+│  ├─ analysis-cache.js        # TTL cache (pure predicate exported for tests)
+│  ├─ recent-domains.js        # MRU history list
+│  └─ mock-data.js             # deterministic Demo Mode fixtures
+├─ scripts/
+│  ├─ check-extension.mjs      # deterministic static gate for CI (`npm run lint`)
+│  └─ trigger_action.py        # CI governance helper (issues/PR comments)
 ├─ styles/
 │  └─ base.css
+├─ tests/                      # node:test unit suites (`npm test`)
+├─ requirements.txt            # pinned Python deps for CI
 ├─ manifest.json
 ├─ API_REFERENCE.md
 ├─ CONTRIBUTING.md
@@ -148,20 +161,26 @@ cd Traffic-Stats-Analyzer
 
 ## Testing
 
-This repository currently has no committed automated unit/integration test suite, so validation is done via linting and deterministic manual checks.
+Validation is done via deterministic static checks, unit tests, and a manual smoke matrix.
 
-### Lint and Package Validation
+### Static Checks and Unit Tests
 
 ```bash
-npx --yes web-ext lint --source-dir .
+npm run lint     # manifest integrity, referenced files, JS syntax, XSS regression guards
+npm test         # node:test suites for domain/format/cache/provider modules
+npm run check    # both
 ```
 
-### Suggested Local Test Commands (if you add test tooling)
+An optional Firefox-oriented marketplace lint is available as well:
 
 ```bash
-npm run lint
-npm run test
-npm run test:integration
+npm run lint:ext
+```
+
+### Suggested Local Test Commands
+
+```bash
+npm run check
 ```
 
 ### Manual Validation Matrix
@@ -169,8 +188,10 @@ npm run test:integration
 1. Verify domain auto-detection on an active browser tab.
 2. Enable `useMock` and confirm stable demo payload rendering.
 3. Disable `useMock`, set API key, and verify live provider output.
-4. Intentionally break endpoint URL and confirm `fallback-mock` handling.
+4. Intentionally break the endpoint URL and confirm `fallback-mock` handling and the error disclosure.
 5. Save custom provider values and reopen popup to validate persistence.
+6. Point the Base URL at a non-RapidAPI origin and confirm the optional host-permission prompt appears on save.
+7. Repeat an analysis within six hours and confirm the cached badge renders; use Refresh to bypass the cache.
 
 > [!CAUTION]
 > A green manual run does not guarantee provider contract compatibility across all third-party API versions.
@@ -254,8 +275,10 @@ console.log(d1, d2);
 - `provider.endpoints.geography`: Geography endpoint prefix.
 - `provider.headers.X-RapidAPI-Key`: Placeholder token expanded with `provider.apiKey`.
 - `provider.headers.X-RapidAPI-Host`: Provider host header.
-- `provider.apiKey`: Runtime API key entered by user.
-- `useMock`: Boolean switch for demo/fallback behavior.
+- `apiKey` (storage.local): RapidAPI key entered by the user. Stored locally on the device and never synced.
+- `useMock`: Boolean switch for demo-mode behavior.
+- `recentDomains` (storage.local): Up to 8 most recently analyzed domains.
+- `analysisCache:<domain>` (storage.local): Cached result envelope with a 6-hour TTL.
 
 ### Default Configuration Schema
 
@@ -271,12 +294,13 @@ console.log(d1, d2);
     "headers": {
       "X-RapidAPI-Key": "__REPLACE__",
       "X-RapidAPI-Host": "similarweb12.p.rapidapi.com"
-    },
-    "apiKey": ""
+    }
   },
   "useMock": true
 }
 ```
+
+> Custom provider origins outside `rapidapi.com` / `similarweb.com` require an optional host-permission grant, requested from the options page at save time.
 
 ### Environment Variables and Startup Flags
 

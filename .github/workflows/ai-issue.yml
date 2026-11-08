@@ -17,6 +17,11 @@ jobs:
   analyze_code:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Fork pull requests are skipped: their code must not be sent to the
+    # hosted inference endpoint, and fork runs cannot rely on secrets anyway.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       issues: write
@@ -30,10 +35,12 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+          cache: pip
 
       - name: Install dependencies
         run: |
-          pip install --no-cache-dir PyGithub==2.5.0 requests==2.32.3
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
 
       - name: Run AI Analysis
         env:
@@ -42,6 +49,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           COMMIT_SHA: ${{ github.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_ACTOR: ${{ github.actor }}
           GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
           ALLOWED_USER: ${{ secrets.ALLOWED_USER }}
-        run: python "trigger action/trigger_action.py"
+        run: python scripts/trigger_action.py

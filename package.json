@@ -1,0 +1,14 @@
+{
+  "name": "web-traffic-analyzer",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Chrome extension that estimates website traffic and top countries via Similarweb-compatible RapidAPI providers.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "lint": "node scripts/check-extension.mjs",
+    "lint:ext": "web-ext lint --source-dir . --self-hosted",
+    "check": "npm run lint && npm test"
+  },
+  "license": "Apache-2.0"
+}
